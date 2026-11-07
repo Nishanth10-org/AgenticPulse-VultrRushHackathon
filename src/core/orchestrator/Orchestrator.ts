@@ -5,6 +5,7 @@ import { LLMAdapter } from '../agents/LLMAdapter';
 import { PlannerAgent } from '../agents/Planner';
 import { WorkerAgent } from '../agents/Worker';
 import { VerifierAgent } from '../agents/Verifier';
+import { MCPGateway } from '../gateway/MCPGateway';
 
 /**
  * Orchestrator is the "Manager" of the Blast Radius Zero platform.
@@ -16,9 +17,11 @@ export class Orchestrator {
   private planner: PlannerAgent;
   private worker: WorkerAgent;
   private verifier: VerifierAgent;
+  private gateway: MCPGateway;
 
   constructor() {
     this.store = new StateStore();
+    this.gateway = new MCPGateway();
 
     // Initialize LLM Adapter (Using a simulated provider for now)
     const llm = new LLMAdapter('anthropic', 'sk-simulated-key');
@@ -27,9 +30,8 @@ export class Orchestrator {
     this.verifier = new VerifierAgent(llm);
   }
 
-  /**
-   * Initializes a new task in the system.
-
+  getGateway() {
+    return this.gateway;
   }
 
   /**
@@ -115,16 +117,41 @@ export class Orchestrator {
           console.log(`[Orchestrator] Executing task in sandbox...`);
 
           // Get the first step from the plan
-          const currentStep = context.plan && context.plan.length > 0 ? context.plan[0] : { step: 1, description: 'Default Step' };
-          const result = await this.worker.executeStep(context, currentStep);
+          const currentStep = context.plan && context.plan.length > 0 ? context.plan[0] : { step: 1, description: 'Default Step', action: 'read_docs' };
 
-          await this.transition(taskId, 'VERIFYING', {
-            actor: 'WORKER',
-            action: 'EXECUTE_STEP',
-            input: currentStep,
-            output: result,
-            status: 'SUCCESS'
-          });
+          try {
+            // INTEGRATION: Route tool call through the MCP Gateway
+            const result = await this.gateway.callTool(
+              currentStep.action || 'read_docs',
+              {
+                name: currentStep.action || 'read_docs',
+                description: currentStep.description || 'Default tool',
+                parameters: {}
+              },
+              currentStep.params || {},
+              async (args) => {
+                // This is where the Vultr Sandbox will eventually be called
+                return `Simulated execution of ${currentStep.action} with args ${JSON.stringify(args)}`;
+              }
+            );
+
+            await this.transition(taskId, 'VERIFYING', {
+              actor: 'WORKER',
+              action: 'EXECUTE_STEP',
+              input: currentStep,
+              output: result,
+              status: 'SUCCESS'
+            });
+          } catch (e: any) {
+            console.error(`[Orchestrator] Execution failed: ${e.message}`);
+            await this.transition(taskId, 'RECOVERING', {
+              actor: 'SUPERVISOR',
+              action: 'HANDLE_ERROR',
+              input: e.message,
+              output: 'Triggering recovery',
+              status: 'FAILURE'
+            });
+          }
           break;
 
         case 'VERIFYING':
