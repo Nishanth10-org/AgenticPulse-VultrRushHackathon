@@ -1,6 +1,10 @@
 import { TaskContext, TaskState } from '../../types';
 import { StateStore } from './StateStore';
 import { v4 as uuidv4 } from 'uuid';
+import { LLMAdapter } from '../agents/LLMAdapter';
+import { PlannerAgent } from '../agents/Planner';
+import { WorkerAgent } from '../agents/Worker';
+import { VerifierAgent } from '../agents/Verifier';
 
 /**
  * Orchestrator is the "Manager" of the Blast Radius Zero platform.
@@ -9,9 +13,23 @@ import { v4 as uuidv4 } from 'uuid';
  */
 export class Orchestrator {
   private store: StateStore;
+  private planner: PlannerAgent;
+  private worker: WorkerAgent;
+  private verifier: VerifierAgent;
 
   constructor() {
     this.store = new StateStore();
+
+    // Initialize LLM Adapter (Using a simulated provider for now)
+    const llm = new LLMAdapter('anthropic', 'sk-simulated-key');
+    this.planner = new PlannerAgent(llm);
+    this.worker = new WorkerAgent(llm);
+    this.verifier = new VerifierAgent(llm);
+  }
+
+  /**
+   * Initializes a new task in the system.
+
   }
 
   /**
@@ -73,15 +91,17 @@ export class Orchestrator {
 
         case 'PLANNING':
           console.log(`[Orchestrator] Planning for goal: ${context.goal}...`);
-          // MOCK: Simulating a Planner Agent
-          await new Promise(resolve => setTimeout(resolve, 500));
+          const plan = await this.planner.plan(context);
           await this.transition(taskId, 'WAITING_APPROVAL', {
             actor: 'PLANNER',
             action: 'CREATE_PLAN',
             input: context.goal,
-            output: { steps: ['Step 1: Hello World'] },
+            output: plan,
             status: 'SUCCESS'
           });
+          const updatedContext = await this.store.getState(taskId);
+          if (updatedContext) updatedContext.plan = plan;
+          await this.store.saveState(updatedContext!);
           break;
 
         case 'WAITING_APPROVAL':
@@ -93,27 +113,31 @@ export class Orchestrator {
 
         case 'EXECUTING':
           console.log(`[Orchestrator] Executing task in sandbox...`);
-          // MOCK: Simulating a Worker Agent + Gateway + Sandbox
-          await new Promise(resolve => setTimeout(resolve, 500));
+
+          // Get the first step from the plan
+          const currentStep = context.plan && context.plan.length > 0 ? context.plan[0] : { step: 1, description: 'Default Step' };
+          const result = await this.worker.executeStep(context, currentStep);
+
           await this.transition(taskId, 'VERIFYING', {
             actor: 'WORKER',
             action: 'EXECUTE_STEP',
-            input: 'Step 1',
-            output: 'Successfully printed Hello World',
+            input: currentStep,
+            output: result,
             status: 'SUCCESS'
           });
           break;
 
         case 'VERIFYING':
           console.log(`[Orchestrator] Verifying execution evidence...`);
-          // MOCK: Simulating a Verifier Agent
-          await new Promise(resolve => setTimeout(resolve, 500));
-          await this.transition(taskId, 'COMPLETED', {
+          const verification = await this.verifier.verify(context);
+
+          const finalState = verification.verdict === 'SUCCESS' ? 'COMPLETED' : 'RECOVERING';
+          await this.transition(taskId, finalState, {
             actor: 'VERIFIER',
             action: 'VERIFY_STEP',
-            input: 'Execution Logs',
-            output: 'Verified: Goal achieved',
-            status: 'SUCCESS'
+            input: 'Audit Trail',
+            output: verification,
+            status: verification.verdict === 'SUCCESS' ? 'SUCCESS' : 'FAILURE'
           });
           break;
 

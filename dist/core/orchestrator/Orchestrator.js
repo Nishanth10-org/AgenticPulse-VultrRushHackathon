@@ -3,6 +3,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.Orchestrator = void 0;
 const StateStore_1 = require("./StateStore");
 const uuid_1 = require("uuid");
+const LLMAdapter_1 = require("../agents/LLMAdapter");
+const Planner_1 = require("../agents/Planner");
+const Worker_1 = require("../agents/Worker");
+const Verifier_1 = require("../agents/Verifier");
 /**
  * Orchestrator is the "Manager" of the Blast Radius Zero platform.
  * It implements the Durable State Machine and coordinates between the
@@ -11,7 +15,17 @@ const uuid_1 = require("uuid");
 class Orchestrator {
     constructor() {
         this.store = new StateStore_1.StateStore();
+        // Initialize LLM Adapter (Using a simulated provider for now)
+        const llm = new LLMAdapter_1.LLMAdapter('anthropic', 'sk-simulated-key');
+        this.planner = new Planner_1.PlannerAgent(llm);
+        this.worker = new Worker_1.WorkerAgent(llm);
+        this.verifier = new Verifier_1.VerifierAgent(llm);
     }
+    /**
+     * Initializes a new task in the system.
+  
+    }
+  
     /**
      * Initializes a new task in the system.
      */
@@ -64,15 +78,18 @@ class Orchestrator {
                     break;
                 case 'PLANNING':
                     console.log(`[Orchestrator] Planning for goal: ${context.goal}...`);
-                    // MOCK: Simulating a Planner Agent
-                    await new Promise(resolve => setTimeout(resolve, 500));
+                    const plan = await this.planner.plan(context);
                     await this.transition(taskId, 'WAITING_APPROVAL', {
                         actor: 'PLANNER',
                         action: 'CREATE_PLAN',
                         input: context.goal,
-                        output: { steps: ['Step 1: Hello World'] },
+                        output: plan,
                         status: 'SUCCESS'
                     });
+                    const updatedContext = await this.store.getState(taskId);
+                    if (updatedContext)
+                        updatedContext.plan = plan;
+                    await this.store.saveState(updatedContext);
                     break;
                 case 'WAITING_APPROVAL':
                     console.log(`[Orchestrator] Waiting for human approval...`);
@@ -82,26 +99,27 @@ class Orchestrator {
                     break;
                 case 'EXECUTING':
                     console.log(`[Orchestrator] Executing task in sandbox...`);
-                    // MOCK: Simulating a Worker Agent + Gateway + Sandbox
-                    await new Promise(resolve => setTimeout(resolve, 500));
+                    // Get the first step from the plan
+                    const currentStep = context.plan && context.plan.length > 0 ? context.plan[0] : { step: 1, description: 'Default Step' };
+                    const result = await this.worker.executeStep(context, currentStep);
                     await this.transition(taskId, 'VERIFYING', {
                         actor: 'WORKER',
                         action: 'EXECUTE_STEP',
-                        input: 'Step 1',
-                        output: 'Successfully printed Hello World',
+                        input: currentStep,
+                        output: result,
                         status: 'SUCCESS'
                     });
                     break;
                 case 'VERIFYING':
                     console.log(`[Orchestrator] Verifying execution evidence...`);
-                    // MOCK: Simulating a Verifier Agent
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    await this.transition(taskId, 'COMPLETED', {
+                    const verification = await this.verifier.verify(context);
+                    const finalState = verification.verdict === 'SUCCESS' ? 'COMPLETED' : 'RECOVERING';
+                    await this.transition(taskId, finalState, {
                         actor: 'VERIFIER',
                         action: 'VERIFY_STEP',
-                        input: 'Execution Logs',
-                        output: 'Verified: Goal achieved',
-                        status: 'SUCCESS'
+                        input: 'Audit Trail',
+                        output: verification,
+                        status: verification.verdict === 'SUCCESS' ? 'SUCCESS' : 'FAILURE'
                     });
                     break;
                 case 'RECOVERING':
